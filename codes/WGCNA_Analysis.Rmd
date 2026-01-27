@@ -1,0 +1,526 @@
+
+---
+title: "WGCNA_final_code"
+output: html_notebook
+---
+ 
+ 
+ 
+# Install BiocManager if not already installed
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+ 
+# Install DESeq2
+BiocManager::install("DESeq2")
+```{r}
+library(dplyr)
+library(DESeq2)
+library(WGCNA)
+```
+#1. Load and preprocess data
+
+#using VST : is preferred for WGCNA because it provides a more statistically sound and stable input, improving the reliability of gene co-expression networks. 
+```{r}
+
+#==============================================================================
+# Step 1: load the files and merge together raw read counts files
+#===============================================================================
+# Folder with your RPKM files, e.g. sample1.txt, sample2.txt ...
+setwd("~/Downloads/WGCNA_Amanpreet/files")
+
+files <- list.files(pattern = "\\.read_count$")
+files
+
+expr_list <- lapply(files, function(f) {
+  df <- read.table(f, header = TRUE, sep = "\t")
+  # Rename count column to sample name (file basename)
+  sample_name <- tools::file_path_sans_ext(basename(f))
+  colnames(df) <- c("GeneID", sample_name)
+  return(df)
+})
+
+# Merge all data frames by GeneID
+expr_merged <- Reduce(function(x, y) full_join(x, y, by = "GeneID"), expr_list)
+
+# Replace NAs with 0 (genes not detected in some samples)
+expr_merged[is.na(expr_merged)] <- 0
+
+# Set rownames as GeneID and remove GeneID column
+rownames(expr_merged) <- expr_merged$GeneID
+expr_merged$GeneID <- NULL
+
+# Check matrix dimensions (genes x samples)
+dim(expr_merged)
+
+metadata <- read.csv("/Users/azk0151/Downloads/WGCNA_genes/metadata.csv", header = TRUE)
+head(metadata)
+
+#Make sure sample names in expr_merged columns and metadata$sampleID match:
+all(colnames(expr_merged) %in% metadata$sampleID)  # should be TRUE
+
+#Reorder metadata to match counts columns:
+metadata <- metadata[match(colnames(expr_merged), metadata$sampleID), ]
+
+#write.table(expr_merged, "~/Downloads/WGCNA_Amanpreet/expr_merged_raw.txt", sep = "\t", quote = FALSE)
+
+expr_merged <- read.table("/Users/azk0151/Downloads/WGCNA_genes/RAW_files-selected/expr_merged_raw.txt", header = TRUE, row.names = 1, sep = "\t")
+
+#==============================================================================
+# Step 2: normalizing
+#===============================================================================
+
+
+# Create DESeq2 dataset
+#dds <- DESeqDataSetFromMatrix(countData = expr_merged, colData = metadata, design = ~ 1) # 1 means across all samples irespective of treatment
+dds <- DESeqDataSetFromMatrix(countData = expr_merged,
+                              colData   = metadata,   # metadata must include "condition"
+                              design    = ~ Condition)
+# keep genes that have at least 10 counts in at least 3 samples
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds <- dds[keep, ]
+
+#1 means Intercept only, no groups modeled,	Just normalization for VST, not differential expression
+
+# Modules show natural co-expression patterns across all samples, reflecting true biological relationships, unbiased by known groups. Ideal for discovering unknown relationships.
+vsd <- vst(dds, blind = TRUE)
+
+#Usually, set blind = FALSE so the transformation respects the experimental design and variability between samples properly. This avoids removing or flattening true biological differences that you want to capture in the network.
+
+# Extract normalized expression matrix
+vsd_mat <- assay(vsd)
+colnames(vsd_mat) <- sub("\\.read_count$", "", colnames(vsd_mat))
+
+# Transpose for WGCNA (samples x genes)
+datExpr <- t(vsd_mat)
+
+# Save normalized data (optional)
+#write.table(datExpr, "/Users/austudent/Downloads/WGCNA_Amanpreet/WGCNA_input_VST_normalized_con.txt", sep = "\t", quote = FALSE)
+
+```
+
+#1. Load and preprocess data
+ 
+```{r}
+#==============================================================================
+# Step: WGCNA
+#===============================================================================
+
+
+
+library(WGCNA)
+options(stringsAsFactors = FALSE)
+enableWGCNAThreads()
+# #/Users/azk0151/Downloads/WGCNA_genes/RAW_files-selected/WGCNA_input_VST_normalized.tx
+
+# Read the gene counts table
+
+#datExpr <- read.table("/Users/azk0151/Downloads/WGCNA_genes/RAW_files-selected/WGCNA_input_VST_normalized.txt", header = TRUE, row.names = 1, sep = "\t")
+
+```
+
+#2.  Sample clustering
+
+
+```{r}
+myOrder <- c("AAL6572HR1", "AAL6572HR2", "AAL6572HR3", "AAL6524HR1", "AAL6524HR2", "AAL6524HR3", "EAL6524HR1", "EAL6524HR2", "EAL6524HR3", "EAL658HR1", "EAL658HR2", "EAL658HR3"
+             )
+
+# Reorder expression & metadata
+datExpr_manual <- datExpr[myOrder, ]
+rownames(metadata) <- metadata$Accession_code
+metadata_manual <- metadata[myOrder, ]
+
+# Rebuild the tree using this fixed order
+sampleTree <- hclust(dist(datExpr_manual), method = "single")
+
+# Extract metadata columns
+metadata2 <- metadata_manual[, c(4, 5)]
+
+# **KEY FIX 1**: Don't reorder by sampleTree - use your manual order
+# The whole point of myOrder was to control the order, so keep it!
+datTraitsOrdered <- metadata2  # Already in your desired order
+
+# Define color palettes
+traitColorList <- list(
+  Condition = c(
+    "Epiphytic" = "#1f77b4",
+    "Apoplastic" = "#d62728"
+  ),
+  Time = c(
+    "8" = "#2ca02c",
+    "24" = "#ff7f0e",
+    "72" = "#9467bd"
+  )
+)
+
+# **KEY FIX 2**: Convert factors to character for proper matching
+traitColors <- data.frame(
+  Condition = traitColorList$Condition[as.character(datTraitsOrdered$Condition)],
+  Time = traitColorList$Time[as.character(datTraitsOrdered$Time)],
+  row.names = rownames(datTraitsOrdered)
+)
+
+pdf(file = "/Users/azk0151/Downloads/sampleClusteringtree.pdf", width = 7, height = 5)
+
+par(mar = c(10, 4, 4, 2))
+
+plotDendroAndColors(
+  sampleTree,
+  colors = as.matrix(traitColors),
+  groupLabels = colnames(traitColors),
+  main = " ",
+  dendroLabels = rownames(datExpr_manual),
+  hang = 0.03,
+  addGuide = FALSE,
+  cex.dendroLabels = 0.8,
+  cex.colorLabels = 0.8
+)
+
+# Use absolute positioning
+par(xpd = TRUE)
+usr <- par("usr")  # Get plot coordinates
+legend(x = mean(usr[1:2]),  # Center horizontally
+       y = usr[3] - 0.2 * diff(usr[3:4]),  # Position below plot
+       legend = c("Epiphytic", "Apoplastic", "8hr", "24hr", "72hr"),
+       fill = c("#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd"),
+       border = "black",
+       bty = "n",
+       horiz = TRUE,
+       xjust = 0.5,  # Center the legend
+       cex = 0.9)
+par(xpd = FALSE)
+
+dev.off()
+```
+
+
+
+```{r}
+sampleTree = hclust(dist(datExpr), method = "single");
+# plot sample tree
+#pdf(file = "/Users/azk0151/Downloads/1-n-sampleClustering.pdf", width = 12, height = 6);
+par(cex = 1.3);
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="",
+     cex.lab = 1.5,cex.axis = 1.5, cex.main = 2)
+#dev.off()
+
+```
+
+#3. Soft-thresholding power
+```{r}
+#===============================================================================
+#
+#  Choose soft threshold parameter
+#
+#===============================================================================
+ 
+# Choose a set of soft threshold parameters
+powers = c(c(1:20), seq(from = 22, to=30, by=2))
+
+sft = pickSoftThreshold(datExpr, powerVector = powers, verbose = 5)
+# Scale-free topology fit index as a function of the soft-thresholding power
+#pdf(file = "2-n-sft.pdf", width = 9, height = 5);
+par(mfrow = c(1,2));
+cex1 = 0.8;
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+#abline(h = 0.80, col = "yellow", lty = 2)
+#abline(h = 0.82, col = "orange", lty = 2)
+#abline(h = 0.88, col = "pink", lty = 2)
+abline(h = 0.80, col = "red", lty = 2)
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+#abline(h = 30, col = "yellow", lty = 2)
+#abline(h = 100, col = "red", lty = 2)
+#dev.off()
+
+```
+
+
+
+#step 4. Build adjacency and TOM
+```{r}
+#===============================================================================
+#
+#  Turn data expression into topological overlap matrix
+#
+#===============================================================================
+ 
+# Turn data expression into topological overlap matrix
+
+#7	0.826	-0.643	0.919	239.0	201.00	698
+
+softPower <- 7
+temp_cor <- cor
+cor <- WGCNA::cor  # use WGCNA optimized correlation
+
+# Adjacency matrix
+adjacency <- adjacency(datExpr, power = softPower, type = "signed")
+
+# signed:Keeps directionality.: Gives modules that are biologically more interpretable — all genes tend to “go up and down together.” 
+#unsigned: mixed up and down gened within modules: Treats positive and negative correlations as equal.
+# TOM (Topological Overlap Matrix)
+TOM <- TOMsimilarity(adjacency, TOMType = "signed")
+dissTOM <- 1 - TOM
+
+cor <- temp_cor
+```
+
+#5. Hierarchical clustering of genes
+```{r}
+#===============================================================================
+#
+#  Construct modules (proceed with the genetree from option 2b)
+#
+#===============================================================================
+# Plot gene tree
+geneTree = hclust(as.dist(dissTOM), method = "average");
+#pdf(file = "3-gene_cluster.pdf", width = 12, height = 9);
+plot(geneTree, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity",
+     labels = FALSE, hang = 0.04);
+#dev.off()
+
+```
+
+
+#6.  Module detection (Dynamic Tree Cut)
+```{r}
+# Module identification using dynamic tree cut
+# We like large modules, so we set the minimum module size relatively high:
+# minModuleSize = 30;
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM,deepSplit = 2,
+                            pamRespectsDendro = FALSE,minClusterSize = 30);
+table(dynamicMods)
+length(table(dynamicMods))
+# Convert numeric labels into colors
+dynamicColors = labels2colors(dynamicMods)
+table(dynamicColors)
+# Plot the dendrogram and colors underneath
+#pdf(file = "4-module_tree.pdf", width = 8, height = 6);
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",dendroLabels = FALSE,
+                    hang = 0.03,addGuide = TRUE, guideHang = 0.05,main = "Gene dendrogram and module colors")
+#dev.off()
+```
+
+# 7. Calculate eigengenes and merge similar modules
+```{r}
+#===============================================================================
+#
+#  Merge modules
+#
+#===============================================================================
+# Calculate eigengenes
+MEList = moduleEigengenes(datExpr_manual, colors = dynamicColors)
+MEs = MEList$eigengenes
+MEs <- orderMEs(MEs)
+head(MEs)
+
+```
+
+```{r}
+# Calculate dissimilarity of module eigengenes
+MEDiss = 1-cor(MEs);
+# Cluster module eigengenes
+METree = hclust(as.dist(MEDiss), method = "average");
+# Plot the result
+sizeGrWindow(7, 6)
+plot(METree, main = "Clustering of module eigengenes",
+     xlab = "", sub = "")
+# Merge close modules
+MEDissThres=0.25 # we can go as low  #This height corresponds to a correlation of over 75%. Any branches below this line are more than 75% related, and you will thus be merging them!
+abline(h=MEDissThres, col = "red")
+merge = mergeCloseModules(datExpr, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+mergedColors = merge$colors 
+mergedMEs = merge$newMEs 
+# Plot merged module tree
+#pdf(file = "5-merged_Module_Tree.pdf", width = 12, height = 9) 
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+                    c("Dynamic Tree Cut", "Merged dynamic"), dendroLabels = FALSE,
+                    hang = 0.03, addGuide = TRUE, guideHang = 0.05) 
+#dev.off()
+```
+
+#8. Final module assignments
+
+```{r}
+moduleColors <- mergedColors
+MEs <- mergedMEs
+nSamples <- nrow(datExpr_manual)
+modNames <- substring(names(MEs), 3)
+
+#kME <- as.data.frame(cor(datExpr, MEs, use="p"))
+geneModuleMembership <- as.data.frame(cor(datExpr_manual, MEs, use = "p"))
+MMPvalue <- as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) <- paste0("MM", modNames)
+names(MMPvalue) <- paste0("p.MM", modNames)
+
+
+
+geneInfo_condition <- data.frame(
+  GeneID = colnames(datExpr),
+  Module = moduleColors
+) %>%
+  cbind(geneModuleMembership) %>%
+  cbind(MMPvalue)
+
+```
+
+```{r}
+moduleColors <- mergedColors
+MEs <- mergedMEs
+module_order = names(MEs) %>% gsub("ME","", .)
+# Add treatment names
+MEs$treatment = row.names(MEs)
+
+# tidy & plot data
+library(tidyr)
+library(ggplot2)
+
+
+mME = MEs %>%
+  pivot_longer(-treatment) %>%
+  mutate(
+    name = gsub("ME", "", name),
+    name = factor(name, levels = module_order)
+  )
+
+
+pdf(file = "/Users/azk0151/Downloads/module_trait.pdf", width = 9, height = 6)
+
+mME %>% 
+  ggplot(., aes(x = factor(treatment, 
+                           levels = c("AAL6524HR1", "AAL6524HR2", "AAL6524HR3", 
+                                     "AAL6572HR1", "AAL6572HR2", "AAL6572HR3", 
+                                     "EAL6524HR1", "EAL6524HR2", "EAL6524HR3",
+                                     "EAL658HR1", "EAL658HR2", "EAL658HR3")), 
+                y = name, 
+                fill = value)) +
+  geom_tile(color = "white", linewidth = 0.5) +  # Add grid lines
+  theme_bw() +
+scale_fill_gradientn(
+  colors = c("#0571B0", "white", "#CA0020"),
+  values = scales::rescale(c(-1, 0, 0.8)),
+  limit = c(-1, 0.8),
+  breaks = seq(-1, 0.8, 0.2)) +
+  labs(x = "Treatments", y = "Modules", fill = "Correlation", 
+       title = " ") +  # Fixed labs() syntax
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+
+dev.off()
+```
+
+
+
+# for combined plot of dedragram and module-trait relatiosnhip plot
+```{r}
+
+library(ggplot2)
+library(cowplot)
+library(gridGraphics)
+
+# ... (all your data preparation code remains the same) ...
+
+myOrder <- c("AAL6572HR1", "AAL6572HR2", "AAL6572HR3", "AAL6524HR1", "AAL6524HR2", "AAL6524HR3", 
+             "EAL6524HR1", "EAL6524HR2", "EAL6524HR3", "EAL658HR1", "EAL658HR2", "EAL658HR3")
+
+datExpr_manual <- datExpr[myOrder, ]
+rownames(metadata) <- metadata$Accession_code
+metadata_manual <- metadata[myOrder, ]
+
+sampleTree <- hclust(dist(datExpr_manual), method = "single")
+metadata2 <- metadata_manual[, c(4, 5)]
+datTraitsOrdered <- metadata2
+
+traitColorList <- list(
+  Condition = c("Epiphytic" = "#1f77b4", "Apoplastic" = "#d62728"),
+  Time = c("8" = "#2ca02c", "24" = "#ff7f0e", "72" = "#9467bd")
+)
+
+traitColors <- data.frame(
+  Condition = traitColorList$Condition[as.character(datTraitsOrdered$Condition)],
+  Time = traitColorList$Time[as.character(datTraitsOrdered$Time)],
+  row.names = rownames(datTraitsOrdered)
+)
+
+# Create Plot B (ggplot)
+plot_B <- mME %>% 
+  ggplot(., aes(x = factor(treatment, 
+                           levels = c("AAL6524HR1", "AAL6524HR2", "AAL6524HR3", 
+                                     "AAL6572HR1", "AAL6572HR2", "AAL6572HR3", 
+                                      "EAL6524HR2", "EAL6524HR3", "EAL6524HR1",
+                                     "EAL658HR1", "EAL658HR2", "EAL658HR3")), 
+                y = name, 
+                fill = value)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  theme_bw() +
+  scale_fill_gradientn(
+    colors = c("#0571B0", "white", "#CA0020"),
+    values = scales::rescale(c(-1, 0, 0.8)),
+    limit = c(-1, 0.8),
+    breaks = seq(-1, 0.8, 0.2)) +
+  labs(x = "Treatments", y = "Modules", fill = "Correlation") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.text.y = element_text(size = 10))
+
+# Function to create Plot A
+plot_A_func <- function() {
+  par(mar = c(10, 4, 4, 2))
+  
+  plotDendroAndColors(
+    sampleTree,
+    colors = as.matrix(traitColors),
+    groupLabels = colnames(traitColors),
+    main = " ",
+    dendroLabels = rownames(datExpr_manual),
+    hang = 0.03,
+    addGuide = FALSE,
+    cex.dendroLabels = 0.8,
+    cex.colorLabels = 0.8
+  )
+  
+  par(xpd = TRUE)
+  usr <- par("usr")
+  legend(x = mean(usr[1:2]),
+         y = usr[3] - 0.2 * diff(usr[3:4]),
+         legend = c("Epiphytic", "Apoplastic", "8hr", "24hr", "72hr"),
+         fill = c("#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd"),
+         border = "white",
+         bty = "n",
+         horiz = TRUE,
+         xjust = 0.5,
+         cex = 0.9)
+  par(xpd = FALSE)
+}
+
+# METHOD 1: Using pdf() directly with high resolution
+pdf(file = "/Users/azk0151/Downloads/combined_plots.pdf", 
+    width = 12, 
+    height = 14)
+
+# Combine using cowplot
+combined_plot <- plot_grid(
+  as_grob(plot_A_func),
+  plot_B,
+  ncol = 1,
+  labels = c("A", "B"),
+  label_size = 16,
+  label_fontface = "bold",
+  rel_heights = c(1, 1)
+)
+
+print(combined_plot)
+
+dev.off()
+```
+

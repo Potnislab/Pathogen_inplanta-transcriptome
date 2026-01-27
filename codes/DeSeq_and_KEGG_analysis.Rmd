@@ -1,0 +1,854 @@
+---
+title: "Deseq_and KEGG analysis"
+author: "PALASH"
+output: html_document
+---
+```{r}
+library(DESeq2)
+library(ggplot2)
+library(RColorBrewer)
+library(dplyr)
+library(readxl)
+library(stringr)
+library(tidyr)
+library(enrichplot)
+library(clusterProfiler)
+```
+
+```{r}
+#######################################################################################################################################################################################
+######################################################################Epiphytic vs Apoplastic (Reference-Apoplastic)###################################################################
+#######################################################################################################################################################################################
+############################################################
+#Set Working directory and load the files
+############################################################
+setwd("~/Library/CloudStorage/Box-Box/Pathogen transcriptomics manuscript/DeSeq_Values_for_WGCNA/Final DeSeq and KEGG analysis/Epi_vs_Apo")
+Apo_AL65_24h_rep1 <- read.table("Apo_AL65_24h_rep1.read_count", row.names = 1)
+Apo_AL65_24h_rep2 <- read.table("Apo_AL65_24h_rep2.read_count", row.names = 1)
+Apo_AL65_24h_rep3 <- read.table("Apo_AL65_24h_rep3.read_count", row.names = 1)
+Apo_AL65_72h_rep1 <- read.table("Apo_AL65_72h_rep1.read_count", row.names = 1)
+Apo_AL65_72h_rep2 <- read.table("Apo_AL65_72h_rep2.read_count", row.names = 1)
+Apo_AL65_72h_rep3 <- read.table("Apo_AL65_72h_rep3.read_count", row.names = 1)
+Epi_AL65_8h_rep1 <- read.table("Epi_AL65_8h_rep1.read_count", row.names = 1)
+Epi_AL65_8h_rep2 <- read.table("Epi_AL65_8h_rep2.read_count", row.names = 1)
+Epi_AL65_8h_rep3 <- read.table("Epi_AL65_8h_rep3.read_count", row.names = 1)
+Epi_AL65_24h_rep1 <- read.table("Epi_AL65_24h_rep1.read_count", row.names = 1)
+Epi_AL65_24h_rep2 <- read.table("Epi_AL65_24h_rep2.read_count", row.names = 1)
+Epi_AL65_24h_rep3 <- read.table("Epi_AL65_24h_rep3.read_count", row.names = 1)
+
+############################################################
+# Combine all count tables
+############################################################
+My_experiment <- cbind(
+  Apo_AL65_24h_rep1, Apo_AL65_24h_rep2, Apo_AL65_24h_rep3,
+  Apo_AL65_72h_rep1, Apo_AL65_72h_rep2, Apo_AL65_72h_rep3,
+  Epi_AL65_8h_rep1,  Epi_AL65_8h_rep2,  Epi_AL65_8h_rep3,
+  Epi_AL65_24h_rep1, Epi_AL65_24h_rep2, Epi_AL65_24h_rep3
+)
+
+colnames(My_experiment) <- c(
+  "Apo_24h_r1","Apo_24h_r2","Apo_24h_r3",
+  "Apo_72h_r1","Apo_72h_r2","Apo_72h_r3",
+  "Epi_8h_r1","Epi_8h_r2","Epi_8h_r3",
+  "Epi_24h_r1","Epi_24h_r2","Epi_24h_r3"
+)
+
+colData_My_experiment <- data.frame(
+  row.names = colnames(My_experiment),
+  condition = c(
+    rep("Apo", 6),
+    rep("Epi", 6)
+  ),
+  time = c(
+    rep("24h", 3), rep("72h", 3),
+    rep("8h", 3),  rep("24h", 3)
+  ),
+  replica = rep(c("1","2","3"), 4)
+)
+
+```
+
+```{r}
+############################################################
+# Make Deseq Matrix
+############################################################
+dds <- DESeqDataSetFromMatrix(
+  countData = My_experiment,
+  colData = colData_My_experiment,
+  design = ~ condition
+)
+dds$condition <- relevel(dds$condition, ref = "Apo")  # Apoplastic as baseline
+dds <- DESeq(dds)
+
+res <- results(dds, contrast = c("condition", "Epi", "Apo"))
+write.csv(as.data.frame(res), "Epiphytic_vs_Apoplastic.csv")
+```
+
+```{r}
+############################################################
+# Make Deseq Matrix with Time as a factor
+############################################################
+dds_time <- DESeqDataSetFromMatrix(
+  countData = My_experiment,
+  colData = colData_My_experiment,
+  design = ~ time + condition
+)
+dds_time$condition <- relevel(dds_time$condition, ref = "Apo")
+dds_time <- DESeq(dds_time)
+
+res <- results(dds_time, contrast = c("condition", "Epi", "Apo"))
+write.csv(as.data.frame(res), "Epiphytic_vs_Apoplastic_timecorrected.csv")
+```
+
+```{r}
+############################################################
+# For PCA Plot
+############################################################
+rld <- rlog(dds_time, blind = FALSE)
+data <- plotPCA(rld, intgroup = c("condition", "time"), returnData = TRUE)
+percentVar <- round(100 * attr(data, "percentVar"))
+
+pcaplot <- ggplot(data, aes(PC1, PC2, color = condition, shape = time)) +
+  geom_point(size = 3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  scale_color_manual(values = c("Apo" = "tomato", "Epi" = "steelblue"))
+pcaplot
+ggsave("PCA_samples_Epi_vs_Apo.pdf", pcaplot, width=6, height=5)
+```
+
+```{r}
+############################################################
+# For Volcano plot
+############################################################
+res_df <- as.data.frame(res)
+res_df$gene <- rownames(res_df)
+res_df$threshold <- ifelse(
+  res_df$padj < 0.05 & abs(res_df$log2FoldChange) >= 1,
+  ifelse(res_df$log2FoldChange > 1, "Up", "Down"),
+  "NS"
+)
+
+volcanoplot <-ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj), color = threshold)) +
+  geom_point(alpha = 0.6, size = 1.2) +
+  scale_color_manual(values = c("Up" = "firebrick", "Down" = "dodgerblue", "NS" = "gray70")) +
+  theme_minimal() +
+  xlab("Log2 Fold Change (Epi vs Apo)") +
+  ylab("-Log10 Adjusted p-value") +
+  ggtitle("Volcano Plot: Epiphytic vs Apoplastic")
+volcanoplot 
+ggsave("Volcanoplot_Epi_vs_Apo.pdf", volcanoplot, width=6, height=5)
+```
+
+
+```{r}
+############################################################
+# Prepare DEG lists
+############################################################
+deg <- res_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05 & abs(log2FoldChange) >= 1)
+
+up_genes <- deg %>% filter(log2FoldChange > 0) %>% pull(gene)
+down_genes <- deg %>% filter(log2FoldChange < 0) %>% pull(gene)
+
+cat("DEGs: up =", length(up_genes), "down =", length(down_genes), "\n")
+
+if (length(up_genes) == 0 & length(down_genes) == 0) {
+  stop("No DEGs found with the chosen thresholds.")
+}
+```
+
+```{r}
+############################################################
+# Read EggNOG-mapper output & build mappings
+############################################################
+eggnog_file <- "eggnog_output.xlsx"
+if (!file.exists(eggnog_file)) stop("EggNOG file not found")
+
+eggnog <- readxl::read_excel(eggnog_file)
+
+# Detect columns automatically
+kegg_col <- grep("KEGG_ko$|KEGG.*KO|KO$", colnames(eggnog), value = TRUE, ignore.case = TRUE)[1]
+go_col   <- grep("^GOs$|GO", colnames(eggnog), value = TRUE, ignore.case = TRUE)[1]
+
+if (is.na(kegg_col)) stop("No KEGG KO column found in EggNOG file")
+if (is.na(go_col)) message("GO column not found → GO enrichment skipped")
+
+# Ensure query_name column exists
+eggnog <- eggnog %>% rename(query_name = 1)
+
+```
+
+```{r}
+############################################################
+# KO extraction with FIX: strip 'ko:' prefix
+############################################################
+
+ko_map <- eggnog %>%
+  select(query_name, !!sym(kegg_col)) %>%
+  rename(KEGG_ko = !!sym(kegg_col)) %>%
+  filter(!is.na(KEGG_ko), KEGG_ko != "-", KEGG_ko != "") %>%
+  mutate(KEGG_ko = str_replace_all(KEGG_ko, "\\s+", "")) %>%
+  separate_rows(KEGG_ko, sep = ",") %>%
+  mutate(
+    KEGG_ko = str_trim(KEGG_ko),
+    KEGG_ko = str_remove(KEGG_ko, "^ko:")
+  ) %>%
+  filter(KEGG_ko != "")
+```
+
+
+```{r}
+############################################################
+# 6) Build KO lists for up/down DEGs
+############################################################
+
+up_ko <- ko_map %>% filter(query_name %in% up_genes) %>% pull(KEGG_ko) %>% unique()
+down_ko <- ko_map %>% filter(query_name %in% down_genes) %>% pull(KEGG_ko) %>% unique()
+
+cat("Mapped KOs: up =", length(up_ko), "down =", length(down_ko), "\n")
+```
+
+
+```{r}
+############################################################
+# KEGG enrichment (KO-based)
+############################################################
+kegg_up <- NULL
+kegg_down <- NULL
+
+if (length(up_ko) > 0) {
+  kegg_up <- tryCatch(
+    enrichKEGG(
+      gene = up_ko,
+      organism = "ko",
+      keyType = "kegg",
+      pvalueCutoff = 0.05
+    ),
+    error = function(e) { message("KEGG up error: ", e$message); NULL }
+  )
+}
+
+if (length(down_ko) > 0) {
+  kegg_down <- tryCatch(
+    enrichKEGG(
+      gene = down_ko,
+      organism = "ko",
+      keyType = "kegg",
+      pvalueCutoff = 0.05
+    ),
+    error = function(e) { message("KEGG down error: ", e$message); NULL }
+  )
+}
+```
+
+
+```{r}
+############################################################
+# Save enrichment results
+############################################################
+if (!is.null(kegg_up)   && nrow(as.data.frame(kegg_up)) > 0)   write.csv(as.data.frame(kegg_up),   "KEGG_up_results.csv",   row.names = FALSE)
+if (!is.null(kegg_down) && nrow(as.data.frame(kegg_down)) > 0) write.csv(as.data.frame(kegg_down), "KEGG_down_results.csv", row.names = FALSE)
+```
+
+```{r}
+############################################################
+# Plotting
+############################################################
+
+library(enrichplot)
+library(ggplot2)
+safe_plot_save <- function(expr, filename, width = 8, height = 6) {
+  tryCatch({
+    pdf(filename, width, height)
+    print(expr)
+    dev.off()
+  }, error = function(e){
+    try(ifelse(dev.cur() > 1, dev.off(), NULL), silent=TRUE)
+    message("Plot error: ", e$message)
+  })
+}
+
+# KEGG
+if (!is.null(kegg_up) && nrow(as.data.frame(kegg_up)) > 0) {
+  safe_plot_save(dotplot(kegg_up), "KEGG_up_dotplot.pdf")
+  safe_plot_save(barplot(kegg_up), "KEGG_up_barplot.pdf")
+}
+
+if (!is.null(kegg_down) && nrow(as.data.frame(kegg_down)) > 0) {
+  safe_plot_save(dotplot(kegg_down), "KEGG_down_dotplot.pdf")
+  safe_plot_save(barplot(kegg_down), "KEGG_down_barplot.pdf")
+}
+```
+
+
+```{r}
+############################################################
+# 10) Adding locus_tag or query name to Kegg up or down
+############################################################
+add_locus_to_kegg <- function(kegg_obj, ko_map) {
+
+  if (is.null(kegg_obj) || nrow(as.data.frame(kegg_obj)) == 0) return(NULL)
+
+  kegg_df <- as.data.frame(kegg_obj)
+
+  out <- kegg_df %>%
+    mutate(KEGG_ko = strsplit(geneID, "/")) %>%
+    unnest(KEGG_ko) %>%
+    left_join(
+      ko_map %>% select(KEGG_ko, query_name) %>% distinct(),
+      by = "KEGG_ko"
+    ) %>%
+    rename(locus_tag = query_name)
+
+  return(out)
+}
+
+# ---------- UP ----------
+kegg_up_with_locus <- add_locus_to_kegg(kegg_up, ko_map)
+
+if (!is.null(kegg_up_with_locus)) {
+  write.csv(
+    kegg_up_with_locus,
+    "KEGG_up_results_WITH_locus_tag.csv",
+    row.names = FALSE
+  )
+}
+
+# ---------- DOWN ----------
+kegg_down_with_locus <- add_locus_to_kegg(kegg_down, ko_map)
+
+if (!is.null(kegg_down_with_locus)) {
+  write.csv(
+    kegg_down_with_locus,
+    "KEGG_down_results_WITH_locus_tag.csv",
+    row.names = FALSE
+  )
+}
+
+```
+
+
+
+
+```{r}
+#######################################################################################################################################################################################
+##############################################################Apoplastic_72hr vs Apoplastic_24hr (Reference-Apoplastic 24hr)###########################################################
+#######################################################################################################################################################################################
+############################################################
+#Set Working directory and load the files
+############################################################
+setwd("~/Library/CloudStorage/Box-Box/Pathogen transcriptomics manuscript/DeSeq_Values_for_WGCNA/Final DeSeq and KEGG analysis/Apoplast_24hr_vs_72Hr")
+Apo_AL65_24h_rep1 <- read.table("Apo_AL65_24h_rep1.read_count", row.names = 1)
+Apo_AL65_24h_rep2 <- read.table("Apo_AL65_24h_rep2.read_count", row.names = 1)
+Apo_AL65_24h_rep3 <- read.table("Apo_AL65_24h_rep3.read_count", row.names = 1)
+Apo_AL65_72h_rep1 <- read.table("Apo_AL65_72h_rep1.read_count", row.names = 1)
+Apo_AL65_72h_rep2 <- read.table("Apo_AL65_72h_rep2.read_count", row.names = 1)
+Apo_AL65_72h_rep3 <- read.table("Apo_AL65_72h_rep3.read_count", row.names = 1)
+```
+
+```{r}
+############################################################
+# Combine all count tables
+############################################################
+My_experiment<-cbind(Apo_AL65_24h_rep1, Apo_AL65_24h_rep2, Apo_AL65_24h_rep3, Apo_AL65_72h_rep1, Apo_AL65_72h_rep2, Apo_AL65_72h_rep3)
+
+colnames(My_experiment)<- c("Apo_AL65_24h_rep1","Apo_AL65_24h_rep2","Apo_AL65_24h_rep3","Apo_AL65_72h_rep1", "Apo_AL65_72h_rep2","Apo_AL65_72h_rep3")
+colData_My_experiment <- data.frame(
+  row.names = colnames(My_experiment),
+  replica = c("1","2","3","1","2","3"),
+  condition = factor(c("Apo_AL65_24h","Apo_AL65_24h","Apo_AL65_24h",
+                       "Apo_AL65_72h","Apo_AL65_72h","Apo_AL65_72h"))
+  
+)
+```
+
+```{r}
+############################################################
+# Make Deseq Matrix
+############################################################
+dds <- DESeqDataSetFromMatrix(countData = My_experiment,
+                              colData = colData_My_experiment,
+                              design = ~ condition)
+
+# Set reference
+dds$condition <- relevel(dds$condition, ref="Apo_AL65_24h")
+
+# Run DESeq
+dds2 <- DESeq(dds)
+
+# Extract results
+res <- results(dds2)
+write.csv(as.data.frame(res), file = "AL65_72h_vs_Apo_AL65_24h_results.csv")
+
+# Save normalized counts
+write.csv(counts(dds2, normalized = TRUE), file = "Apo_normalized_counts.csv")
+```
+
+```{r}
+rld <- rlogTransformation(dds, blind=TRUE)
+
+data <- plotPCA(rld, intgroup=c("condition", "replica"),returnData=TRUE) 
+
+percentVar <- round(100 * attr(data,"percentVar")) 
+data <- plotPCA(rld, intgroup=c("condition", "replica"), returnData=TRUE)
+percentVar <- round(100 * attr(data, "percentVar"))
+```
+
+```{r}
+# VST and rlog
+vsd <- vst(dds, blind=FALSE)
+rld <- rlog(dds, blind=FALSE)
+```
+
+```{r}
+############################################################
+# PCA Plot
+############################################################
+data <- plotPCA(rld, intgroup=c("condition", "replica"), returnData=TRUE)
+percentVar <- round(100 * attr(data,"percentVar"))
+
+pcaplot <- ggplot(data, aes(PC1, PC2, color=condition, shape=replica)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  scale_color_manual(values=c("Apo_AL65_24h"="tomato", "Apo_AL65_72h"="springgreen"))
+
+ggsave("PCA_samples_AL65_Apo.pdf", pcaplot, width=6, height=5)
+pcaplot
+```
+
+```{r}
+############################################################
+# Prepare dataframe for volcano plot
+############################################################
+res_df <- as.data.frame(res)
+res_df$gene <- rownames(res_df)
+
+# Volcano thresholds
+res_df$threshold <- as.factor(ifelse(res_df$padj < 0.05 & abs(res_df$log2FoldChange) >= 1,
+                                     ifelse(res_df$log2FoldChange > 1,"Up","Down"),"NS"))
+
+volcano <- ggplot(res_df, aes(x=log2FoldChange, y=-log10(padj), color=threshold)) +
+  geom_point(alpha=0.7, size=1.5) +
+  scale_color_manual(values=c("Down"="dodgerblue","Up"="firebrick","NS"="gray70")) +
+  theme_minimal() +
+  xlab("Log2 Fold Change (72h vs 24h)") +
+  ylab("-Log10 Adjusted P-value") +
+  ggtitle("Volcano Plot: Apoplastic AL65 72h vs 24h") +
+  theme(legend.position="right")
+volcano
+ggsave("Volcano_AL65_Apoplastic.pdf", volcano, width=6, height=5)
+```
+
+
+```{r}
+############################################################
+# As one of the genes was showing NA in p.adj just checking what is the issue
+# Look at mean normalized counts for this gene
+############################################################
+counts(dds2, normalized=TRUE)["E2P69_RS03235", ]
+
+# Check if DESeq2 flagged it due to Cook’s distance
+resultsNames(dds2)
+res <- results(dds2, cooksCutoff=FALSE) # turn off Cook’s distance filtering
+res["E2P69_RS03235", ]
+```
+
+
+```{r}
+############################################################
+# Prepare DEG lists
+############################################################
+
+deg <- res_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05 & abs(log2FoldChange) >= 1)
+
+up_genes <- deg %>% filter(log2FoldChange > 0) %>% pull(gene)
+down_genes <- deg %>% filter(log2FoldChange < 0) %>% pull(gene)
+
+cat("DEGs: up =", length(up_genes), "down =", length(down_genes), "\n")
+
+if (length(up_genes) == 0 & length(down_genes) == 0) {
+  stop("No DEGs found with the chosen thresholds.")
+}
+```
+
+```{r}
+############################################################
+# Read EggNOG-mapper output & build mappings
+############################################################
+eggnog_file <- "eggnog_output.xlsx"
+if (!file.exists(eggnog_file)) stop("EggNOG file not found")
+
+eggnog <- readxl::read_excel(eggnog_file)
+
+# Detect columns automatically
+kegg_col <- grep("KEGG_ko$|KEGG.*KO|KO$", colnames(eggnog), value = TRUE, ignore.case = TRUE)[1]
+go_col   <- grep("^GOs$|GO", colnames(eggnog), value = TRUE, ignore.case = TRUE)[1]
+
+if (is.na(kegg_col)) stop("No KEGG KO column found in EggNOG file")
+if (is.na(go_col)) message("GO column not found → GO enrichment skipped")
+
+# Ensure query_name column exists
+eggnog <- eggnog %>% rename(query_name = 1)
+
+```
+
+```{r}
+############################################################
+# KO extraction with FIX: strip 'ko:' prefix
+############################################################
+ko_map <- eggnog %>%
+  select(query_name, !!sym(kegg_col)) %>%
+  rename(KEGG_ko = !!sym(kegg_col)) %>%
+  filter(!is.na(KEGG_ko), KEGG_ko != "-", KEGG_ko != "") %>%
+  mutate(KEGG_ko = str_replace_all(KEGG_ko, "\\s+", "")) %>%
+  separate_rows(KEGG_ko, sep = ",") %>%
+  mutate(
+    KEGG_ko = str_trim(KEGG_ko),
+    KEGG_ko = str_remove(KEGG_ko, "^ko:")
+  ) %>%
+  filter(KEGG_ko != "")
+```
+
+```{r}
+############################################################
+# Build KO lists for up/down DEGs
+############################################################
+up_ko <- ko_map %>% filter(query_name %in% up_genes) %>% pull(KEGG_ko) %>% unique()
+down_ko <- ko_map %>% filter(query_name %in% down_genes) %>% pull(KEGG_ko) %>% unique()
+
+cat("Mapped KOs: up =", length(up_ko), "down =", length(down_ko), "\n")
+```
+
+
+```{r}
+############################################################
+# KEGG enrichment (KO-based)
+############################################################
+kegg_up <- NULL
+kegg_down <- NULL
+
+if (length(up_ko) > 0) {
+  kegg_up <- tryCatch(
+    enrichKEGG(
+      gene = up_ko,
+      organism = "ko",
+      keyType = "kegg",
+      pvalueCutoff = 0.05
+    ),
+    error = function(e) { message("KEGG up error: ", e$message); NULL }
+  )
+}
+
+if (length(down_ko) > 0) {
+  kegg_down <- tryCatch(
+    enrichKEGG(
+      gene = down_ko,
+      organism = "ko",
+      keyType = "kegg",
+      pvalueCutoff = 0.05
+    ),
+    error = function(e) { message("KEGG down error: ", e$message); NULL }
+  )
+}
+```
+
+```{r}
+############################################################
+# Save enrichment results
+############################################################
+if (!is.null(kegg_up)   && nrow(as.data.frame(kegg_up)) > 0)   write.csv(as.data.frame(kegg_up),   "KEGG_up_results.csv",   row.names = FALSE)
+if (!is.null(kegg_down) && nrow(as.data.frame(kegg_down)) > 0) write.csv(as.data.frame(kegg_down), "KEGG_down_results.csv", row.names = FALSE)
+```
+
+```{r}
+############################################################
+# Plotting
+############################################################
+safe_plot_save <- function(expr, filename, width = 8, height = 6) {
+  tryCatch({
+    pdf(filename, width, height)
+    print(expr)
+    dev.off()
+  }, error = function(e){
+    try(ifelse(dev.cur() > 1, dev.off(), NULL), silent=TRUE)
+    message("Plot error: ", e$message)
+  })
+}
+
+# KEGG
+if (!is.null(kegg_up) && nrow(as.data.frame(kegg_up)) > 0) {
+  safe_plot_save(dotplot(kegg_up), "KEGG_up_dotplot.pdf")
+  safe_plot_save(barplot(kegg_up), "KEGG_up_barplot.pdf")
+}
+
+if (!is.null(kegg_down) && nrow(as.data.frame(kegg_down)) > 0) {
+  safe_plot_save(dotplot(kegg_down), "KEGG_down_dotplot.pdf")
+  safe_plot_save(barplot(kegg_down), "KEGG_down_barplot.pdf")
+}
+```
+
+
+
+
+
+
+```{r}
+#######################################################################################################################################################################################
+########################################################################Epiphytic_8hour_vs_24hour (Reference-Epiphytic 8hr)############################################################
+#######################################################################################################################################################################################
+############################################################
+#Set Working directory and load the files
+############################################################
+setwd("~/Library/CloudStorage/Box-Box/Pathogen transcriptomics manuscript/DeSeq_Values_for_WGCNA/Final DeSeq and KEGG analysis/Epiphytic_8hr_vs_24hr")
+Epi_AL65_8h_rep1 <- read.table("Epi_AL65_8h_rep1.read_count", row.names = 1)
+Epi_AL65_8h_rep2 <- read.table("Epi_AL65_8h_rep2.read_count", row.names = 1)
+Epi_AL65_8h_rep3 <- read.table("Epi_AL65_8h_rep3.read_count", row.names = 1)
+Epi_AL65_24h_rep1 <- read.table("Epi_AL65_24h_rep1.read_count", row.names = 1)
+Epi_AL65_24h_rep2 <- read.table("Epi_AL65_24h_rep2.read_count", row.names = 1)
+Epi_AL65_24h_rep3 <- read.table("Epi_AL65_24h_rep3.read_count", row.names = 1)
+```
+
+```{r}
+############################################################
+# Combine all count tables
+############################################################
+My_experiment<-cbind(Epi_AL65_8h_rep1, Epi_AL65_8h_rep2, Epi_AL65_8h_rep3, Epi_AL65_24h_rep1, Epi_AL65_24h_rep2, Epi_AL65_24h_rep3)
+
+colnames(My_experiment)<- c("Epi_AL65_8h_rep1","Epi_AL65_8h_rep2","Epi_AL65_8h_rep3","Epi_AL65_24h_rep1", "Epi_AL65_24h_rep2","Epi_AL65_24h_rep3")
+colData_My_experiment <- data.frame(
+  row.names = colnames(My_experiment),
+  replica = c("1","2","3","1","2","3"),
+  condition = factor(c("Epi_AL65_8h","Epi_AL65_8h","Epi_AL65_8h",
+                       "Epi_AL65_24h","Epi_AL65_24h","Epi_AL65_24h"))
+  
+)
+```
+
+```{r}
+############################################################
+# Make Deseq Matrix
+############################################################
+dds <- DESeqDataSetFromMatrix(countData = My_experiment,
+                              colData = colData_My_experiment,
+                              design = ~ condition)
+
+dds$condition <- relevel(dds$condition, ref="Epi_AL65_8h")
+dds2 <- DESeq(dds)
+res <- results(dds2)
+write.csv(as.data.frame(res), file = "Epi_AL65_24h_VS_Epi_AL65_8h_results.csv")
+write.csv(counts(dds2, normalized = TRUE), file = "normalized_counts.csv")
+```
+
+```{r}
+rld <- rlogTransformation(dds, blind=TRUE)
+
+data <- plotPCA(rld, intgroup=c("condition", "replica"),returnData=TRUE) 
+
+percentVar <- round(100 * attr(data,"percentVar")) 
+data <- plotPCA(rld, intgroup=c("condition", "replica"), returnData=TRUE)
+percentVar <- round(100 * attr(data, "percentVar"))
+```
+
+```{r}
+vsd <- vst(dds, blind=FALSE)
+rld <- rlog(dds, blind=FALSE)
+```
+
+```{r}
+############################################################
+# PCA Plot
+############################################################
+data <- plotPCA(rld, intgroup=c("condition", "replica"), returnData=TRUE)
+percentVar <- round(100 * attr(data,"percentVar"))
+
+pcaplot <- ggplot(data, aes(PC1, PC2, color=condition, shape=replica)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  scale_color_manual(values=c("Epi_AL65_8h"="tomato", "Epi_AL65_24h"="springgreen"))
+
+#ggsave("PCA_samples_AL65_Epiphytic24h_VS_Epi_AL65_8h.pdf", pcaplot, width=6, height=5)
+pcaplot
+```
+
+```{r}
+############################################################
+# Volcano plot
+############################################################
+res_df <- as.data.frame(res)
+res_df$gene <- rownames(res_df)
+
+res_df <- subset(res_df, !is.na(log2FoldChange) & !is.na(padj))
+
+res_df$threshold <- as.factor(ifelse(res_df$padj < 0.05 & abs(res_df$log2FoldChange) >= 1,
+                                     ifelse(res_df$log2FoldChange > 1,"Up","Down"),"NS"))
+
+volcano <- ggplot(res_df, aes(x=log2FoldChange, y=-log10(padj), color=threshold)) +
+  geom_point(alpha=0.7, size=1.5) +
+  scale_color_manual(values=c("Down"="dodgerblue","Up"="firebrick","NS"="gray70")) +
+  theme_minimal() +
+  xlab("Log2 Fold Change (24h vs 8h)") +
+  ylab("-Log10 Adjusted P-value") +
+  ggtitle("Volcano Plot: AL65 24h vs 8h") +
+  theme(legend.position="right")
+ggsave("Volcano_AL65_Epiphytic_24h_VS_Epi_AL65_8h.pdf", volcano, width=6, height=5)
+volcano
+```
+
+
+```{r}
+############################################################
+# Prepare DEG lists
+############################################################
+deg <- res_df %>%
+  filter(!is.na(padj)) %>%
+  filter(padj < 0.05 & abs(log2FoldChange) >= 1)
+
+up_genes <- deg %>% filter(log2FoldChange > 0) %>% pull(gene)
+down_genes <- deg %>% filter(log2FoldChange < 0) %>% pull(gene)
+
+cat("DEGs: up =", length(up_genes), "down =", length(down_genes), "\n")
+
+if (length(up_genes) == 0 & length(down_genes) == 0) {
+  stop("No DEGs found with the chosen thresholds.")
+}
+```
+
+```{r}
+############################################################
+# Read EggNOG-mapper output & build mappings
+############################################################
+
+library(readxl)
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+eggnog_file <- "eggnog_output.xlsx"
+if (!file.exists(eggnog_file)) stop("EggNOG file not found")
+
+eggnog <- readxl::read_excel(eggnog_file)
+
+# Detect columns automatically
+kegg_col <- grep("KEGG_ko$|KEGG.*KO|KO$", colnames(eggnog), value = TRUE, ignore.case = TRUE)[1]
+go_col   <- grep("^GOs$|GO", colnames(eggnog), value = TRUE, ignore.case = TRUE)[1]
+
+if (is.na(kegg_col)) stop("No KEGG KO column found in EggNOG file")
+if (is.na(go_col)) message("GO column not found → GO enrichment skipped")
+
+# Ensure query_name column exists
+eggnog <- eggnog %>% rename(query_name = 1)
+
+```
+
+```{r}
+############################################################
+# KO extraction with FIX: strip 'ko:' prefix
+############################################################
+ko_map <- eggnog %>%
+  select(query_name, !!sym(kegg_col)) %>%
+  rename(KEGG_ko = !!sym(kegg_col)) %>%
+  filter(!is.na(KEGG_ko), KEGG_ko != "-", KEGG_ko != "") %>%
+  mutate(KEGG_ko = str_replace_all(KEGG_ko, "\\s+", "")) %>%
+  separate_rows(KEGG_ko, sep = ",") %>%
+  mutate(
+    KEGG_ko = str_trim(KEGG_ko),
+    KEGG_ko = str_remove(KEGG_ko, "^ko:")
+  ) %>%
+  filter(KEGG_ko != "")
+```
+
+```{r}
+############################################################
+# Build KO lists for up/down DEGs
+############################################################
+up_ko <- ko_map %>% filter(query_name %in% up_genes) %>% pull(KEGG_ko) %>% unique()
+down_ko <- ko_map %>% filter(query_name %in% down_genes) %>% pull(KEGG_ko) %>% unique()
+
+cat("Mapped KOs: up =", length(up_ko), "down =", length(down_ko), "\n")
+```
+
+
+```{r}
+############################################################
+# KEGG enrichment (KO-based)
+############################################################
+kegg_up <- NULL
+kegg_down <- NULL
+
+if (length(up_ko) > 0) {
+  kegg_up <- tryCatch(
+    enrichKEGG(
+      gene = up_ko,
+      organism = "ko",
+      keyType = "kegg",
+      pvalueCutoff = 0.05
+    ),
+    error = function(e) { message("KEGG up error: ", e$message); NULL }
+  )
+}
+
+if (length(down_ko) > 0) {
+  kegg_down <- tryCatch(
+    enrichKEGG(
+      gene = down_ko,
+      organism = "ko",
+      keyType = "kegg",
+      pvalueCutoff = 0.05
+    ),
+    error = function(e) { message("KEGG down error: ", e$message); NULL }
+  )
+}
+```
+
+
+```{r}
+############################################################
+# Save enrichment results
+############################################################
+if (!is.null(kegg_up)   && nrow(as.data.frame(kegg_up)) > 0)   write.csv(as.data.frame(kegg_up),   "KEGG_up_results.csv",   row.names = FALSE)
+if (!is.null(kegg_down) && nrow(as.data.frame(kegg_down)) > 0) write.csv(as.data.frame(kegg_down), "KEGG_down_results.csv", row.names = FALSE)
+```
+
+```{r}
+############################################################
+# Plotting
+############################################################
+safe_plot_save <- function(expr, filename, width = 8, height = 6) {
+  tryCatch({
+    pdf(filename, width, height)
+    print(expr)
+    dev.off()
+  }, error = function(e){
+    try(ifelse(dev.cur() > 1, dev.off(), NULL), silent=TRUE)
+    message("Plot error: ", e$message)
+  })
+}
+
+# KEGG
+if (!is.null(kegg_up) && nrow(as.data.frame(kegg_up)) > 0) {
+  safe_plot_save(dotplot(kegg_up), "KEGG_up_dotplot.pdf")
+  safe_plot_save(barplot(kegg_up), "KEGG_up_barplot.pdf")
+}
+
+if (!is.null(kegg_down) && nrow(as.data.frame(kegg_down)) > 0) {
+  safe_plot_save(dotplot(kegg_down), "KEGG_down_dotplot.pdf")
+  safe_plot_save(barplot(kegg_down), "KEGG_down_barplot.pdf")
+}
+```
+
+
+
+
+
+
+
+
+
+
+
